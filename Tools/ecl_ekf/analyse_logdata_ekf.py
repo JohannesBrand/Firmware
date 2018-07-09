@@ -7,7 +7,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
-def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_levels,
+def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, vehicle_status_dataset, check_levels,
                 plot=False, output_plot_filename=None, late_start_early_ending=True):
 
     if plot:
@@ -34,6 +34,7 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
     # generate max, min and 1-std metadata
     innov_time = 1e-6 * ekf2_innovations['timestamp']
     status_time = 1e-6 * estimator_status['timestamp']
+    vehicle_time = 1e-6 * vehicle_status_dataset.data['timestamp']
 
     if plot:
         # vertical velocity and position innovations
@@ -1016,26 +1017,60 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
 
     # Do some automated analysis of the status data
     # normal index range is defined by the flight duration
-    start_index = np.amin(np.where(status_time > in_air_transition_time))
-    end_index = np.amax(np.where(status_time <= on_ground_transition_time))
-    num_valid_values = (end_index - start_index + 1)
-    # find a late/early index range from 5 sec after in_air_transtion_time to 5 sec before on-ground transition time for mag and optical flow checks to avoid false positives
-    # this can be used to prevent false positives for sensors adversely affected by close proximity to the ground
-    # don't do this if the log starts or finishes in air or if it is shut off by flag
-    late_start_index = np.amin(np.where(status_time > (in_air_transition_time + 5.0)))\
-        if (late_start_early_ending and not b_starts_in_air) else start_index
-    early_end_index = np.amax(np.where(status_time <= (on_ground_transition_time - 5.0))) \
-        if (late_start_early_ending and not b_finishes_in_air) else end_index
-    num_valid_values_trimmed = (early_end_index - late_start_index + 1)
+    start_index, end_index, late_start_index, early_end_index, num_valid_values, num_valid_values_trimmed = calc_time_ix(
+        status_time, in_air_transition_time, on_ground_transition_time, b_starts_in_air, b_finishes_in_air,
+        late_start_early_ending)
+
     # also find the start and finish indexes for the innovation data
-    innov_start_index = np.amin(np.where(innov_time > in_air_transition_time))
-    innov_end_index = np.amax(np.where(innov_time <= on_ground_transition_time))
-    innov_num_valid_values = (innov_end_index - innov_start_index + 1)
-    innov_late_start_index = np.amin(np.where(innov_time > (in_air_transition_time + 5.0))) \
-        if (late_start_early_ending and not b_starts_in_air) else innov_start_index
-    innov_early_end_index = np.amax(np.where(innov_time <= (on_ground_transition_time - 5.0))) \
-        if (late_start_early_ending and not b_finishes_in_air) else innov_end_index
-    innov_num_valid_values_trimmed = (innov_early_end_index - innov_late_start_index + 1)
+    innov_start_index, innov_end_index, innov_late_start_index, innov_early_end_index, innov_num_valid_values, \
+    innov_num_valid_values_trimmed = calc_time_ix(
+        innov_time, in_air_transition_time, on_ground_transition_time, b_starts_in_air, b_finishes_in_air,
+        late_start_early_ending)
+
+    # add flight mode indices
+    flight_mode_indices = {fm: (np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32))
+                           for fm in set(vehicle_status_dataset.data['nav_state'])}
+
+    flight_mode_changes = vehicle_status_dataset.list_value_changes('nav_state')
+
+    for i in range(len(flight_mode_changes)):
+        fm_start = 1e-6 * flight_mode_changes[i][0]
+        if i < len(flight_mode_changes) - 1:
+            fm_end = 1e-6 * flight_mode_changes[i+1][0]
+        else:
+            fm_end = vehicle_time[-1]
+
+        # list all indices that are after start and before end
+        fm_start_indices = np.where(status_time > fm_start)[0]
+        fm_end_indices = np.where(status_time <= fm_end)[0]
+        fm_innov_start_indices = np.where(innov_time > fm_start)[0]
+        fm_innov_end_indices = np.where(innov_time <= fm_end)[0]
+
+        fm_status_start_ix = max(np.amin(fm_start_indices), start_index) if fm_start_indices.shape[0] > 0 \
+            else end_index + 1
+        fm_status_end_ix = min(np.amax(fm_end_indices), end_index) if fm_end_indices.shape[0] > 0 \
+            else start_index - 1
+        fm_innov_start_ix = max(np.amin(fm_innov_start_indices), innov_start_index) if fm_innov_start_indices.shape[0] > 0 \
+            else innov_end_index + 1
+        fm_innov_end_ix = min(np.amax(fm_innov_end_indices), innov_end_index) if fm_innov_end_indices.shape[0] > 0 \
+            else innov_start_index - 1
+
+        if fm_status_end_ix > fm_status_start_ix and fm_innov_end_ix > fm_innov_start_ix:
+            #
+            flight_mode_indices[flight_mode_changes[i][1]] = (
+                np.concatenate(
+                    (flight_mode_indices[flight_mode_changes[i][1]][0], np.arange(fm_status_start_ix, fm_status_end_ix+1))),
+                np.concatenate(
+                    (flight_mode_indices[flight_mode_changes[i][1]][1], np.arange(fm_innov_start_ix, fm_innov_end_ix+1))))
+
+    # and for the vehicle data
+    '''
+    veh_start_index, veh_end_index, veh_late_start_index, veh_early_end_index, veh_num_valid_values, \
+    veh_num_valid_values_trimmed = calc_time_ix(
+        vehicle_time, in_air_transition_time, on_ground_transition_time, b_starts_in_air, b_finishes_in_air,
+        late_start_early_ending)
+    '''
+
     # define dictionary of test results and descriptions
     test_results = {
         'master_status': ['Pass',
@@ -1164,6 +1199,11 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
         'on_ground_transition_time': [round(on_ground_transition_time, 1),
                                       'The time in seconds measured from startup  that the EKF transitioned out of in-air mode. Set to a nan if a transition event is not detected.'],
     }
+
+    flight_modes = set(vehicle_status_dataset.data['nav_state'])
+    #flight_mode_ix = {fm: }
+    test_results_flight_log = {fm: test_results.copy() for fm in flight_modes }
+
     # generate test metadata
     # reduction of innovation message data
     if (innov_early_end_index > (innov_late_start_index + 50)):
@@ -1174,6 +1214,7 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             ekf2_innovations['output_tracking_error[1]'][innov_late_start_index:innov_early_end_index + 1])
         test_results['output_obs_pos_err_median'][0] = np.median(
             ekf2_innovations['output_tracking_error[2]'][innov_late_start_index:innov_early_end_index + 1])
+
     # reduction of status message data
     if (early_end_index > (late_start_index + 50)):
         # IMU vibration checks
@@ -1208,6 +1249,21 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             test_results['yaw_fail_percentage'][0] = 100.0 * (
                     yaw_innov_fail[late_start_index:early_end_index + 1] > 0.5).sum() / num_valid_values_trimmed
 
+            for fm in flight_modes:
+                test_results_flight_log[fm]['mag_percentage_red'][0] = 100.0 * np.mean(
+                        estimator_status['mag_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+                test_results_flight_log[fm]['mag_percentage_amber'][0] = 100.0 * np.mean(
+                        estimator_status['mag_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                                        test_results_flight_log[fm]['mag_percentage_red'][0]
+                test_results_flight_log[fm]['magx_fail_percentage'][0] = 100.0 * np.mean(
+                    magx_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+                test_results_flight_log[fm]['magy_fail_percentage'][0] = 100.0 * np.mean(
+                        magy_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+                test_results_flight_log[fm]['magz_fail_percentage'][0] = 100.0 * np.mean(
+                        magz_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+                test_results_flight_log[fm]['yaw_fail_percentage'][0] = 100.0 * np.mean(
+                        yaw_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+
         # Velocity Sensor Checks
         if (np.amax(using_gps) > 0.5):
             vel_num_red = (estimator_status['vel_test_ratio'][start_index:end_index + 1] > 1.0).sum()
@@ -1218,6 +1274,15 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             test_results['vel_test_mean'][0] = np.mean(estimator_status['vel_test_ratio'][start_index:end_index + 1])
             test_results['vel_fail_percentage'][0] = 100.0 * (
                     vel_innov_fail[start_index:end_index + 1] > 0.5).sum() / num_valid_values
+
+            for fm in flight_modes:
+                test_results_flight_log[fm]['vel_percentage_red'][0] = 100.0 * np.mean(
+                        estimator_status['vel_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+                test_results_flight_log[fm]['vel_percentage_amber'][0] = 100.0 * 100.0 * np.mean(
+                        estimator_status['vel_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                                    test_results_flight_log[fm]['vel_percentage_red'][0]
+                test_results_flight_log[fm]['vel_fail_percentage'][0] = 100.0 * np.mean(
+                    vel_innov_fail[flight_mode_indices[fm][0]] > 0.5)
 
         # Position Sensor Checks
         if ((np.amax(using_gps) > 0.5) or (np.amax(using_evpos) > 0.5)):
@@ -1230,6 +1295,16 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             test_results['pos_fail_percentage'][0] = 100.0 * (
                     posh_innov_fail[start_index:end_index + 1] > 0.5).sum() / num_valid_values
 
+            for fm in flight_modes:
+                test_results_flight_log[fm]['pos_percentage_red'][0] = 100.0 * np.mean(
+                    estimator_status['pos_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+                test_results_flight_log[fm]['pos_percentage_amber'][0] = 100.0 * 100.0 * np.mean(
+                    estimator_status['pos_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                            test_results_flight_log[fm]['pos_percentage_red'][0]
+                test_results_flight_log[fm]['pos_fail_percentage'][0] = 100.0 * np.mean(
+                        posh_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+
+
         # Height Sensor Checks
         hgt_num_red = (estimator_status['hgt_test_ratio'][late_start_index:early_end_index + 1] > 1.0).sum()
         hgt_num_amber = (estimator_status['hgt_test_ratio'][late_start_index:early_end_index + 1] > 0.5).sum() - hgt_num_red
@@ -1239,6 +1314,15 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
         test_results['hgt_test_mean'][0] = np.mean(estimator_status['hgt_test_ratio'][late_start_index:early_end_index + 1])
         test_results['hgt_fail_percentage'][0] = 100.0 * (
                 posv_innov_fail[late_start_index:early_end_index + 1] > 0.5).sum() / num_valid_values_trimmed
+
+        for fm in flight_modes:
+            test_results_flight_log[fm]['hgt_percentage_red'][0] = 100.0 * np.mean(
+                estimator_status['hgt_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+            test_results_flight_log[fm]['hgt_percentage_amber'][0] = 100.0 * 100.0 * np.mean(
+                estimator_status['hgt_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                                test_results_flight_log[fm]['hgt_percentage_red'][0]
+            test_results_flight_log[fm]['hgt_fail_percentage'][0] = 100.0 * np.mean(
+                posv_innov_fail[flight_mode_indices[fm][0]] > 0.5)
 
         # Airspeed Sensor Checks
         if (tas_test_max > 0.0):
@@ -1251,6 +1335,15 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             test_results['tas_fail_percentage'][0] = 100.0 * (
                     tas_innov_fail[start_index:end_index + 1] > 0.5).sum() / num_valid_values
 
+            for fm in flight_modes:
+                test_results_flight_log[fm]['tas_percentage_red'][0] = 100.0 * np.mean(
+                    estimator_status['tas_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+                test_results_flight_log[fm]['tas_percentage_amber'][0] = 100.0 * 100.0 * np.mean(
+                    estimator_status['tas_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                                    test_results_flight_log[fm]['tas_percentage_red'][0]
+                test_results_flight_log[fm]['tas_fail_percentage'][0] = 100.0 * np.mean(
+                    tas_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+
         # HAGL Sensor Checks
         if (hagl_test_max > 0.0):
             hagl_num_red = (estimator_status['hagl_test_ratio'][start_index:end_index + 1] > 1.0).sum()
@@ -1262,12 +1355,27 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             test_results['hagl_fail_percentage'][0] = 100.0 * (
                     hagl_innov_fail[start_index:end_index + 1] > 0.5).sum() / num_valid_values
 
+            for fm in flight_modes:
+                test_results_flight_log[fm]['hagl_percentage_red'][0] = 100.0 * np.mean(
+                    estimator_status['hagl_test_ratio'][flight_mode_indices[fm][0]] > 1.0)
+                test_results_flight_log[fm]['hagl_percentage_amber'][0] = 100.0 * 100.0 * np.mean(
+                    estimator_status['hagl_test_ratio'][flight_mode_indices[fm][0]] > 0.5) - \
+                                     test_results_flight_log[fm]['hagl_percentage_red'][0]
+                test_results_flight_log[fm]['hagl_fail_percentage'][0] = 100.0 * np.mean(
+                    hagl_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+
         # optical flow sensor checks
         if (np.amax(using_optflow) > 0.5):
             test_results['ofx_fail_percentage'][0] = 100.0 * (
                     ofx_innov_fail[late_start_index:early_end_index + 1] > 0.5).sum() / num_valid_values_trimmed
             test_results['ofy_fail_percentage'][0] = 100.0 * (
                     ofy_innov_fail[late_start_index:early_end_index + 1] > 0.5).sum() / num_valid_values_trimmed
+
+            for fm in flight_modes:
+                test_results_flight_log[fm]['ofx_fail_percentage'][0] = 100.0 * np.mean(
+                    ofx_innov_fail[flight_mode_indices[fm][0]] > 0.5)
+                test_results_flight_log[fm]['ofy_fail_percentage'][0] = 100.0 * np.mean(
+                    ofy_innov_fail[flight_mode_indices[fm][0]] > 0.5)
 
         # IMU bias checks
         test_results['imu_dang_bias_median'][0] = (np.median(estimator_status['states[10]']) ** 2 + np.median(
@@ -1276,6 +1384,12 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
             estimator_status['states[14]']) ** 2 + np.median(estimator_status['states[15]']) ** 2) ** 0.5
     # Check for internal filter nummerical faults
     test_results['filter_faults_max'][0] = np.amax(estimator_status['filter_fault_flags'])
+
+    for fm in flight_modes:
+        test_results_flight_log[fm]['filter_faults_max'][0] = np.amax(
+            estimator_status['filter_fault_flags'][flight_mode_indices[fm][0]]) if \
+            flight_mode_indices[fm][0].shape[0] > 0 else 0
+
     # TODO - process the following bitmask's when they have been properly documented in the uORB topic
     # estimator_status['health_flags']
     # estimator_status['timeout_flags']
@@ -1371,4 +1485,60 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, check_leve
         test_results['master_status'][0] = 'Fail'
         test_results['filter_fault_status'][0] = 'Fail'
 
-    return test_results
+    # check for individual flight mode failures
+    for fm in flight_modes:
+        if ((test_results_flight_log[fm].get('magx_fail_percentage')[0] > check_levels.get('mag_fail_pct')) or
+                (test_results_flight_log[fm].get('magy_fail_percentage')[0] > check_levels.get('mag_fail_pct')) or
+                (test_results_flight_log[fm].get('magz_fail_percentage')[0] > check_levels.get('mag_fail_pct')) or
+                (test_results_flight_log[fm].get('mag_percentage_amber')[0] > check_levels.get(
+                    'mag_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['mag_sensor_status'][0] = 'Fail'
+        if (test_results_flight_log[fm].get('yaw_fail_percentage')[0] > check_levels.get('yaw_fail_pct')):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['yaw_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('vel_fail_percentage')[0] > check_levels.get('vel_fail_pct')) or
+                (test_results_flight_log[fm].get('vel_percentage_amber')[0] > check_levels.get('vel_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['vel_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('pos_fail_percentage')[0] > check_levels.get('pos_fail_pct')) or
+                (test_results_flight_log[fm].get('pos_percentage_amber')[0] > check_levels.get('pos_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['pos_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('hgt_fail_percentage')[0] > check_levels.get('hgt_fail_pct')) or
+                (test_results_flight_log[fm].get('hgt_percentage_amber')[0] > check_levels.get('hgt_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['hgt_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('tas_fail_percentage')[0] > check_levels.get('tas_fail_pct')) or
+                (test_results_flight_log[fm].get('tas_percentage_amber')[0] > check_levels.get('tas_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['tas_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('hagl_fail_percentage')[0] > check_levels.get('hagl_fail_pct')) or
+                (test_results_flight_log[fm].get('hagl_percentage_amber')[0] > check_levels.get('hagl_amber_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['hagl_sensor_status'][0] = 'Fail'
+        if ((test_results_flight_log[fm].get('ofx_fail_percentage')[0] > check_levels.get('flow_fail_pct')) or
+                (test_results_flight_log[fm].get('ofy_fail_percentage')[0] > check_levels.get('flow_fail_pct'))):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['flow_sensor_status'][0] = 'Fail'
+        if (test_results_flight_log[fm].get('filter_faults_max')[0] > 0):
+            test_results_flight_log[fm]['master_status'][0] = 'Fail'
+            test_results_flight_log[fm]['filter_fault_status'][0] = 'Fail'
+
+    return test_results, test_results_flight_log
+
+
+def calc_time_ix(status_time, in_air_transition_time, on_ground_transition_time, b_starts_in_air, b_finishes_in_air,
+                 late_start_early_ending):
+    start_index = np.amin(np.where(status_time > in_air_transition_time))
+    end_index = np.amax(np.where(status_time <= on_ground_transition_time))
+    num_valid_values = (end_index - start_index + 1)
+    # find a late/early index range from 5 sec after in_air_transtion_time to 5 sec before on-ground transition time for mag and optical flow checks to avoid false positives
+    # this can be used to prevent false positives for sensors adversely affected by close proximity to the ground
+    # don't do this if the log starts or finishes in air or if it is shut off by flag
+    late_start_index = np.amin(np.where(status_time > (in_air_transition_time + 5.0))) \
+        if (late_start_early_ending and not b_starts_in_air) else start_index
+    early_end_index = np.amax(np.where(status_time <= (on_ground_transition_time - 5.0))) \
+        if (late_start_early_ending and not b_finishes_in_air) else end_index
+    num_valid_values_trimmed = (early_end_index - late_start_index + 1)
+    return start_index, end_index, late_start_index, early_end_index, num_valid_values, num_valid_values_trimmed

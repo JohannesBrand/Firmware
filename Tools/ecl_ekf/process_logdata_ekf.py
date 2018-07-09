@@ -55,6 +55,13 @@ for d in data:
         sensor_preflight_data = d.data
         print('found sensor_preflight data')
 
+# extract data from sensor preflight check message
+vehicle_status = {}
+for d in data:
+    if d.name == 'vehicle_status':
+        vehicle_status_dataset = d
+        print('found vehicle_status data')
+
 
 if args.check_level_thresholds:
     check_level_dict_filename = args.check_level_thresholds
@@ -74,10 +81,9 @@ with open(check_level_dict_filename, 'r') as file:
 print('Using test criteria loaded from {:s}'.format(check_level_dict_filename))
 
 # perform the ekf analysis
-test_results = analyse_ekf(
-    estimator_status_data, ekf2_innovations_data, sensor_preflight_data,
-    check_levels, plot=not args.no_plots, output_plot_filename=args.filename + ".pdf",
-    late_start_early_ending=not args.no_sensor_safety_margin)
+test_results, test_results_flight_log = analyse_ekf(
+    estimator_status_data, ekf2_innovations_data, sensor_preflight_data, vehicle_status_dataset,
+    check_levels, plot=not args.no_plots, output_plot_filename=args.filename + ".pdf")
 
 # write metadata to a .csv file
 with open(args.filename + ".mdat.csv", "w") as file:
@@ -89,9 +95,29 @@ with open(args.filename + ".mdat.csv", "w") as file:
     key_list = list(test_results.keys())
     key_list.sort()
     for key in key_list:
-        file.write(key+","+str(test_results[key][0])+","+test_results[key][1]+"\n")
+        file.write(key + "," + str(test_results[key][0])+","+test_results[key][1]+"\n")
 
 print('Test results written to {:s}.mdat.csv'.format(args.filename))
+
+# write metadata to a .csv file
+with open(args.filename + ".fmmdat.csv", "w") as file:
+
+    fms = list(test_results_flight_log.keys())
+    fms.sort()
+
+    for fm in fms:
+
+        file.write("name, flight_mode, value, description\n")
+
+        # loop through the test results dictionary and write each entry on a separate row, with data comma separated
+        # save data in alphabetical order
+        key_list = list(test_results_flight_log[fm].keys())
+        key_list.sort()
+        for key in key_list:
+            file.write('{:s},{:d},{:s},{:s}\n'.format(
+                key, fm, str(test_results_flight_log[fm][key][0]), test_results[key][1]))
+
+print('Flight mode test results written to {:s}.fmmdat.csv'.format(args.filename))
 
 if not args.no_plots:
     print('Plots saved to {:s}.pdf'.format(args.filename))
