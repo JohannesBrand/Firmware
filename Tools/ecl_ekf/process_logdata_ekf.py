@@ -105,9 +105,9 @@ with open(args.filename + ".fmmdat.csv", "w") as file:
     fms = list(test_results_flight_log.keys())
     fms.sort()
 
-    for fm in fms:
+    file.write("name,flight_mode,value,description\n")
 
-        file.write("name, flight_mode, value, description\n")
+    for fm in fms:
 
         # loop through the test results dictionary and write each entry on a separate row, with data comma separated
         # save data in alphabetical order
