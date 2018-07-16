@@ -1,3 +1,4 @@
+import copy
 import numpy as np
 
 # matplotlib don't use Xwindows backend (must be before pyplot import)
@@ -1202,7 +1203,7 @@ def analyse_ekf(estimator_status, ekf2_innovations, sensor_preflight, vehicle_st
 
     flight_modes = set(vehicle_status_dataset.data['nav_state'])
     #flight_mode_ix = {fm: }
-    test_results_flight_log = {fm: test_results.copy() for fm in flight_modes }
+    test_results_flight_log = {fm: copy.deepcopy(test_results) for fm in flight_modes }
 
     # generate test metadata
     # reduction of innovation message data
